@@ -1,5 +1,6 @@
 module DHT.KAD.RPC (
                     Message(..)
+                   , MsgBody(..)
                    , SendM
                    , runSendM
                    , sendPing
@@ -10,6 +11,8 @@ module DHT.KAD.RPC (
                    , sendFoundNode
                    , sendFindValue
                    , sendFoundValue
+                   , unpackMessage
+                   , genSN
                    ) where
 
 import Control.Monad.Reader
@@ -21,10 +24,16 @@ import Data.Char
 import Data.Map as Map
 import Data.Serialize
 import Data.Word
+import System.Random
+
 import DHT.KAD.Data
 import DHT.KAD.Transport
 
-data Message = Ping Node
+data Message = Message MsgHead MsgBody
+
+type MsgHead = Word160
+
+data MsgBody = Ping Node
              | Pong Node
              | Store Key Value
              | Stored Key
@@ -107,6 +116,10 @@ getNode = do
   return (Node nid ip port)
 
 instance Serialize Message where
+    put (Message head body) = putWord160 head >> put body
+    get = getWord160 >>= \h -> get >>= \b -> return $ Message h b
+
+instance Serialize MsgBody where
     put (Ping node) = putWord8 0x01 >> putNode node
     put (Pong node) = putWord8 0x81 >> putNode node
     put (Store k v) = putWord8 0x02 >> putKV (k, v)
@@ -136,21 +149,21 @@ instance Serialize Message where
                0x84 -> getFoundValue
                _ -> return $ Error "Unknown message"
         where
-          getPing :: Get Message
+          getPing :: Get MsgBody
           getPing = liftM Ping getNode
-          getPong :: Get Message
+          getPong :: Get MsgBody
           getPong = liftM Pong getNode
-          getError :: Get Message
+          getError :: Get MsgBody
           getError = do len <- getVarint
                         bs <- getByteString len
                         return $ Error $ BC.unpack bs
-          getStore :: Get Message
+          getStore :: Get MsgBody
           getStore = getKV >>= uncurry ((return .) . Store)
-          getStored :: Get Message
+          getStored :: Get MsgBody
           getStored = liftM Stored getWord160
-          getFindNode :: Get Message
+          getFindNode :: Get MsgBody
           getFindNode = liftM FindNode getWord160
-          getFoundNode :: Get Message
+          getFoundNode :: Get MsgBody
           getFoundNode = do len <- getVarint
                             nodes <- getNodes (return []) len
                             return $ FoundNode nodes
@@ -160,45 +173,55 @@ instance Serialize Message where
                              n <- getNode
                              ns <- nodes
                              getNodes (return (n:ns)) (loop - 1)
-          getFindValue :: Get Message
+          getFindValue :: Get MsgBody
           getFindValue = liftM FindValue getWord160
-          getFoundValue :: Get Message
+          getFoundValue :: Get MsgBody
           getFoundValue = getKV >>= uncurry ((return .) . FoundValue)
 
 packMessage :: Message -> ByteString
 packMessage = encode
 
+unpackMessage :: ByteString -> Either String Message
+unpackMessage = decode
+
 type SendM = ReaderT Connection IO (Either String Int)
 runSendM :: SendM -> Connection -> IO (Either String Int)
 runSendM = runReaderT
 
-sendMessage :: Message -> SendM
-sendMessage m = do
+sendMessage :: MsgHead -> MsgBody -> SendM
+sendMessage h b = do
   c <- ask
-  liftIO $ sendMsg c m
+  liftIO $ sendMsg c $ Message h b
   where sendMsg :: Connection -> Message -> IO (Either String Int)
         sendMsg c m = send c $ packMessage m
 
-sendPing :: Node -> SendM
-sendPing = sendMessage . Ping
+sendPing :: MsgHead -> Node -> SendM
+sendPing h n = sendMessage h $ Ping n
 
-sendPong :: Node -> SendM
-sendPong = sendMessage . Pong
+sendPong :: MsgHead -> Node -> SendM
+sendPong h n = sendMessage h $ Pong n
 
-sendStore :: Key -> Value -> SendM
-sendStore = (sendMessage .) . Store
+sendStore :: MsgHead -> Key -> Value -> SendM
+sendStore h k v = sendMessage h $ Store k v
 
-sendStored :: Key -> SendM
-sendStored = sendMessage . Stored
+sendStored :: MsgHead -> Key -> SendM
+sendStored h k = sendMessage h $ Stored k
 
-sendFindNode :: NID -> SendM
-sendFindNode = sendMessage . FindNode
+sendFindNode :: MsgHead -> NID -> SendM
+sendFindNode h n = sendMessage h $ FindNode n
 
-sendFoundNode :: [Node] -> SendM
-sendFoundNode = sendMessage . FoundNode
+sendFoundNode :: MsgHead -> [Node] -> SendM
+sendFoundNode h ns = sendMessage h $ FoundNode ns
 
-sendFindValue :: Key -> SendM
-sendFindValue = sendMessage . FindValue
+sendFindValue :: MsgHead -> Key -> SendM
+sendFindValue h k = sendMessage h $ FindValue k
 
-sendFoundValue :: Key -> Value -> SendM
-sendFoundValue = (sendMessage .) . FoundValue
+sendFoundValue :: MsgHead -> Key -> Value -> SendM
+sendFoundValue h k v = sendMessage h $ FoundValue k v
+
+genSN :: IO Word160
+genSN = do
+  w0 <- getStdRandom (random) :: IO Word32
+  w1 <- getStdRandom (random) :: IO Word64
+  w2 <- getStdRandom (random) :: IO Word64
+  return $ makeNid w0 w1 w2

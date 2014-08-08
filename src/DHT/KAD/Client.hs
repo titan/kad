@@ -39,9 +39,10 @@ findNode nid bucket = do
           bracket (createTransport Req) Transport.free $ \t ->
               bracket (Transport.connect t n) (either (\_ -> return ()) Transport.close) $
                       either (\err -> hPutStrLn stderr err >> return (n, Nothing)) $ \c -> do
-                        runSendM (sendFindNode nid) c
+                        sn <- RPC.genSN
+                        runSendM (sendFindNode sn nid) c
                         m <- timeout (30 * 1000000) $ Transport.recv c
-                        maybe (hPutStrLn stderr "Send FindNode timeout" >> return (n, Nothing)) (either (\err -> hPutStrLn stderr err >> return (n, Nothing)) (\msg -> case msg of FoundNode ns -> return (n, Just ns); _ -> return (n, Just [])) . decode) m
+                        maybe (hPutStrLn stderr "Send FindNode timeout" >> return (n, Nothing)) (either (\err -> hPutStrLn stderr err >> return (n, Nothing)) (\(Message h msg) -> if h == sn then case msg of FoundNode ns -> return (n, Just ns); _ -> return (n, Just []) else return (n, Nothing)) . RPC.unpackMessage) m
       go :: Map.Map Node Int -> Map.Map Node Int -> [Node] -> IO ([Node], [Node])
       go result failed [] = do
                         return (if Map.size result > 8 then
@@ -74,9 +75,10 @@ findValue key bucket cache = do
           bracket (createTransport Req) Transport.free $ \t ->
               bracket (Transport.connect t n) (either (\_ -> return ()) Transport.close) $
                       either (\err -> hPutStrLn stderr err >> return (n, Nothing)) $ \conn -> do
-                               runSendM (sendFindValue k) conn
+                               sn <- RPC.genSN
+                               runSendM (sendFindValue sn k) conn
                                m <- timeout (30 * 1000000) $ Transport.recv conn
-                               maybe (hPutStrLn stderr ("Send FindValue to " ++ (show n) ++ " timeout") >> return (n, Nothing)) (either ((>> return (n, Nothing)) . (hPutStrLn stderr)) (\msg -> case msg of FoundValue _ v -> return (n, Just (Right v)); FoundNode ns -> return (n, Just (Left ns)); _ -> return (n, Nothing)) . decode) m
+                               maybe (hPutStrLn stderr ("Send FindValue to " ++ (show n) ++ " timeout") >> return (n, Nothing)) (either ((>> return (n, Nothing)) . (hPutStrLn stderr)) (\(Message h msg) -> if h == sn then case msg of FoundValue _ v -> return (n, Just (Right v)); FoundNode ns -> return (n, Just (Left ns)); _ -> return (n, Nothing) else return (n, Nothing)) . RPC.unpackMessage) m
       go :: [Node] -> Key -> Maybe Value -> Map.Map Node Int -> Map.Map Node Int -> IO (Maybe Value, [Node], [Node])
       go [] _ v noResponses noValues = return (v, Map.keys noResponses, Map.keys noValues)
       go toSend k v noResponses noValues =
@@ -111,9 +113,10 @@ joinSelf roots bucket = do
           bracket (createTransport Req) Transport.free $ \t ->
               bracket (Transport.connect t n) (either (\_ -> return ()) Transport.close) $
                       either (\err -> hPutStrLn stderr err >> return Nothing) $ \conn -> do
-                          runSendM (sendPing l) conn
+                          sn <- RPC.genSN
+                          runSendM (sendPing sn l) conn
                           m <- timeout (30 * 1000000) $ Transport.recv conn
-                          maybe (hPutStrLn stderr ("Send Ping to " ++ (show n) ++ " timeout") >> return Nothing) (either ((>> return Nothing) . (hPutStrLn stderr)) (\msg -> case msg of Pong n -> return (Just n); _ -> return Nothing) . decode) m
+                          maybe (hPutStrLn stderr ("Send Ping to " ++ (show n) ++ " timeout") >> return Nothing) (either ((>> return Nothing) . (hPutStrLn stderr)) (\(Message h msg) -> if h == sn then case msg of Pong n -> return (Just n); _ -> return Nothing else return Nothing) . RPC.unpackMessage) m
 
 doSendStore :: Key -> Value -> [Node] -> IO [Node]
 doSendStore k v toSend = do
@@ -125,7 +128,9 @@ doSendStore k v toSend = do
       sendStore' k v n =
           bracket (createTransport Req) Transport.free $ \t ->
               bracket (Transport.connect t n) (either (\_ -> return ()) Transport.close) $
-                      either (\err -> hPutStrLn stderr err >> return Nothing) (\conn -> runSendM (sendStore k v) conn >> (timeout (30 * 1000000) (Transport.recv conn)) >>= maybe (hPutStrLn stderr ("Send Store to " ++ (show n) ++ " timeout") >> return (Just n)) (\m -> return Nothing))
+                      either
+                         (\err -> hPutStrLn stderr err >> return Nothing)
+                         (\conn -> RPC.genSN >>= \sn -> runSendM (sendStore sn k v) conn >> (timeout (30 * 1000000) (Transport.recv conn)) >>= maybe (hPutStrLn stderr ("Send Store to " ++ (show n) ++ " timeout") >> return (Just n)) (either (\err -> hPutStrLn stderr err >> return (Just n)) (\(Message h _) -> if h == sn then return Nothing else return (Just n)) . RPC.unpackMessage))
 
 deleteNoResponses :: [Node] -> Bucket -> Bucket
 deleteNoResponses [] b = b
