@@ -22,21 +22,18 @@ start bucket cache =
               bracket (readMVar bucket >>= \b@(Bucket local _) -> Transport.bind t local) (either (\_ -> return ()) Transport.close) $
                       either putStrLn $ \conn ->
                           forever $
-                            either putStrLn (\(RPC.Message h msg) ->
+                            either putStrLn (\(RPC.Message (MsgHead sn from) msg) ->
                                                 case msg of
-                                                  Ping n -> do
-                                                           forkIO $ readMVar bucket >>= \(Bucket local map') -> runSendM (sendPong h local) conn >> return ()
-                                                           tryAddNode n bucket 8
-                                                  Store k v -> modifyMVar_ cache (return . Map.insert k v) >> void (runSendM (sendStored h k) conn)
-                                                  FindNode nid -> readMVar bucket >>= sendNearNodes conn h nid -- \b -> (sendNearNodes conn nid b) (\node -> void $ runSendM (sendFoundNode [node]) conn) (findNode nid b)
-                                                  FindValue k -> readMVar cache >>= maybe (sendNearNodes conn h k =<< readMVar bucket) (void . flip runSendM conn . sendFoundValue h k) . Map.lookup k
-                                                  -- FindValue k -> readMVar cache >>= \ch -> maybe (readMVar bucket >>= sendNearNodes conn k) (\v -> void $ runSendM (sendFoundValue k v) conn) (Map.lookup k ch)
+                                                  Ping -> readMVar bucket >>= \(Bucket local map') -> runSendM (sendPong (MsgHead sn local)) conn >> tryAddNode from bucket 8
+                                                  Store k v -> modifyMVar_ cache (return . Map.insert k v) >> readMVar bucket >>= \(Bucket local _) -> runSendM (sendStored (MsgHead sn local) k) conn >> tryAddNode from bucket 8
+                                                  FindNode nid -> readMVar bucket >>= sendNearNodes conn sn nid >> tryAddNode from bucket 8
+                                                  FindValue k -> readMVar cache >>= maybe (sendNearNodes conn sn k =<< readMVar bucket) (\v -> readMVar bucket >>= \(Bucket local _) -> void $ runSendM (sendFoundValue (MsgHead sn local) k v) conn) . Map.lookup k >> tryAddNode from bucket 8
                                                   Error err -> putStrLn err
                                            ) . RPC.unpackMessage =<< Transport.recv conn
     where
-      sendNearNodes conn h nid bucket = do
+      sendNearNodes conn sn nid bucket@(Bucket local _) = do
         let nodes = nearNodes nid bucket 3
-        runSendM (sendFoundNode h nodes) conn
+        runSendM (sendFoundNode (MsgHead sn local) nodes) conn
         return ()
 
 tryAddNode :: Node -> MVar Bucket -> Int -> IO ()
@@ -68,6 +65,6 @@ tryAddNode node bucket threshold =
               bracket (Transport.connect t n) (either (\_ -> return ()) Transport.close) $
                       either (\err -> hPutStrLn stderr err >> return Nothing) $ \conn -> do
                           sn <- RPC.genSN
-                          runSendM (sendPing sn l) conn
+                          runSendM (sendPing (MsgHead sn l)) conn
                           m <- timeout (30 * 1000000) $ Transport.recv conn
-                          maybe (hPutStrLn stderr ("Send Ping to " ++ (show n) ++ " timeout") >> return Nothing) (either ((>> return Nothing) . (hPutStrLn stderr)) (\(Message h msg) -> if h == sn then case msg of Pong n -> return (Just n); _ -> return Nothing else return Nothing) . RPC.unpackMessage) m
+                          maybe (hPutStrLn stderr ("Send Ping to " ++ (show n) ++ " timeout") >> return Nothing) (either ((>> return Nothing) . (hPutStrLn stderr)) (\(Message (MsgHead sn' from) msg) -> if sn' == sn then case msg of Pong -> return (Just from); _ -> return Nothing else return Nothing) . RPC.unpackMessage) m

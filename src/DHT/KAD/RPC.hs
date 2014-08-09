@@ -1,5 +1,6 @@
 module DHT.KAD.RPC (
                     Message(..)
+                   , MsgHead(..)
                    , MsgBody(..)
                    , SendM
                    , runSendM
@@ -31,10 +32,10 @@ import DHT.KAD.Transport
 
 data Message = Message MsgHead MsgBody
 
-type MsgHead = Word160
+data MsgHead = MsgHead Word160 Node
 
-data MsgBody = Ping Node
-             | Pong Node
+data MsgBody = Ping
+             | Pong
              | Store Key Value
              | Stored Key
              | FindNode NID
@@ -116,12 +117,16 @@ getNode = do
   return (Node nid ip port)
 
 instance Serialize Message where
-    put (Message head body) = putWord160 head >> put body
-    get = getWord160 >>= \h -> get >>= \b -> return $ Message h b
+    put (Message head body) = put head >> put body
+    get = get >>= \h -> get >>= \b -> return $ Message h b
+
+instance Serialize MsgHead where
+    put (MsgHead sn from) = putWord160 sn >> putNode from
+    get = getWord160 >>= \sn -> getNode >>= \from -> return $ MsgHead sn from
 
 instance Serialize MsgBody where
-    put (Ping node) = putWord8 0x01 >> putNode node
-    put (Pong node) = putWord8 0x81 >> putNode node
+    put Ping = putWord8 0x01
+    put Pong = putWord8 0x81
     put (Store k v) = putWord8 0x02 >> putKV (k, v)
     put (Stored k) = putWord8 0x82 >> putWord160 k
     put (FindNode nid) = putWord8 0x03 >> putWord160 nid
@@ -150,9 +155,9 @@ instance Serialize MsgBody where
                _ -> return $ Error "Unknown message"
         where
           getPing :: Get MsgBody
-          getPing = liftM Ping getNode
+          getPing = return Ping
           getPong :: Get MsgBody
-          getPong = liftM Pong getNode
+          getPong = return Pong
           getError :: Get MsgBody
           getError = do len <- getVarint
                         bs <- getByteString len
@@ -195,11 +200,11 @@ sendMessage h b = do
   where sendMsg :: Connection -> Message -> IO (Either String Int)
         sendMsg c m = send c $ packMessage m
 
-sendPing :: MsgHead -> Node -> SendM
-sendPing h n = sendMessage h $ Ping n
+sendPing :: MsgHead -> SendM
+sendPing h = sendMessage h Ping
 
-sendPong :: MsgHead -> Node -> SendM
-sendPong h n = sendMessage h $ Pong n
+sendPong :: MsgHead -> SendM
+sendPong h = sendMessage h Pong
 
 sendStore :: MsgHead -> Key -> Value -> SendM
 sendStore h k v = sendMessage h $ Store k v
