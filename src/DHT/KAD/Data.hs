@@ -19,6 +19,8 @@ module DHT.KAD.Data (
                     , Word160(..)
                     , Bucket(..)
                     , Cache
+                    , Deadline
+                    , getCurrentTimeAsDeadline
                     ) where
 
 import Crypto.Hash.RIPEMD160 as R160
@@ -28,6 +30,7 @@ import qualified Data.ByteString.Char8 as BC
 import Data.List hiding (lookup, insert)
 import qualified Data.IntMap.Strict as IntMap hiding (delete)
 import qualified Data.Map.Strict as Map hiding (delete)
+import Data.Time.Clock.POSIX
 import Data.Word
 import Prelude hiding (lookup)
 
@@ -196,7 +199,7 @@ nodeDist a b = nidDist (nid a) (nid b)
 nidDist :: NID -> NID -> Word160
 nidDist = nidXor
 
-type Cache = Map.Map Key Value
+type Cache = Map.Map Key (Deadline, Value)
 
 data Bucket = Bucket Node (IntMap.IntMap [Node])
 
@@ -251,3 +254,10 @@ ip2string ip = (show b0) ++ "." ++ (show b1) ++ "." ++ (show b2) ++ "." ++ (show
       b1 = fromIntegral (ip `shiftR` 16) :: Word8
       b2 = fromIntegral (ip `shiftR` 08) :: Word8
       b3 = fromIntegral  ip              :: Word8
+
+type Deadline = Word32
+
+getCurrentTimeAsDeadline :: IO Deadline
+getCurrentTimeAsDeadline = do
+  t <- getPOSIXTime
+  return (fromIntegral (round t) :: Deadline)

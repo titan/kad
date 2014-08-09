@@ -36,12 +36,12 @@ data MsgHead = MsgHead Word160 Node
 
 data MsgBody = Ping
              | Pong
-             | Store Key Value
+             | Store Key Value Deadline
              | Stored Key
              | FindNode NID
              | FoundNode [Node]
              | FindValue Key
-             | FoundValue Key Value
+             | FoundValue Key Value Deadline
              | Error String
 
 putVarint :: Putter Int
@@ -127,7 +127,7 @@ instance Serialize MsgHead where
 instance Serialize MsgBody where
     put Ping = putWord8 0x01
     put Pong = putWord8 0x81
-    put (Store k v) = putWord8 0x02 >> putKV (k, v)
+    put (Store k v d) = putWord8 0x02 >> putKV (k, v) >> putWord32be d
     put (Stored k) = putWord8 0x82 >> putWord160 k
     put (FindNode nid) = putWord8 0x03 >> putWord160 nid
     put (FoundNode nodes) = do
@@ -135,7 +135,7 @@ instance Serialize MsgBody where
       putVarint $ Prelude.length nodes
       mapM_ putNode nodes
     put (FindValue k) = putWord8 0x04 >> putWord160 k
-    put (FoundValue k v) = putWord8 0x84 >> putKV (k, v)
+    put (FoundValue k v d) = putWord8 0x84 >> putKV (k, v) >> putWord32be d
     put (Error err) = do
       putWord8 0x00
       putVarint $ B.length b
@@ -163,7 +163,7 @@ instance Serialize MsgBody where
                         bs <- getByteString len
                         return $ Error $ BC.unpack bs
           getStore :: Get MsgBody
-          getStore = getKV >>= uncurry ((return .) . Store)
+          getStore = getKV >>= \(k , v) -> getWord32be >>= \d -> return $ Store k v d
           getStored :: Get MsgBody
           getStored = liftM Stored getWord160
           getFindNode :: Get MsgBody
@@ -181,7 +181,7 @@ instance Serialize MsgBody where
           getFindValue :: Get MsgBody
           getFindValue = liftM FindValue getWord160
           getFoundValue :: Get MsgBody
-          getFoundValue = getKV >>= uncurry ((return .) . FoundValue)
+          getFoundValue = getKV >>= \(k, v) -> getWord32be >>= \d -> return (FoundValue k v d)
 
 packMessage :: Message -> ByteString
 packMessage = encode
@@ -206,8 +206,8 @@ sendPing h = sendMessage h Ping
 sendPong :: MsgHead -> SendM
 sendPong h = sendMessage h Pong
 
-sendStore :: MsgHead -> Key -> Value -> SendM
-sendStore h k v = sendMessage h $ Store k v
+sendStore :: MsgHead -> Key -> Value -> Deadline -> SendM
+sendStore h k v d = sendMessage h $ Store k v d
 
 sendStored :: MsgHead -> Key -> SendM
 sendStored h k = sendMessage h $ Stored k
@@ -221,8 +221,8 @@ sendFoundNode h ns = sendMessage h $ FoundNode ns
 sendFindValue :: MsgHead -> Key -> SendM
 sendFindValue h k = sendMessage h $ FindValue k
 
-sendFoundValue :: MsgHead -> Key -> Value -> SendM
-sendFoundValue h k v = sendMessage h $ FoundValue k v
+sendFoundValue :: MsgHead -> Key -> Value -> Deadline -> SendM
+sendFoundValue h k v d = sendMessage h $ FoundValue k v d
 
 genSN :: IO Word160
 genSN = do
