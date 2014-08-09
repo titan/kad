@@ -4,10 +4,10 @@ module DHT.KAD.Client (
                       , store
                       ) where
 
-import Control.Concurrent (forkIO, threadDelay)
+import Control.Concurrent (forkIO)
 import Control.Concurrent.MVar
 import Control.Exception (bracket)
-import Control.Monad (liftM, void)
+import Control.Monad (liftM)
 import Control.Monad.Parallel as P (mapM)
 import Data.List (sortBy)
 import qualified Data.IntMap.Strict as IntMap
