@@ -1,8 +1,10 @@
 module DHT.KAD.Data (
                      addNode
+                    , addNodes
                     , deleteNode
                     , findNode
                     , nearNodes
+                    , allNodes
                     , Node(..)
                     , NID
                     , makeNid
@@ -20,7 +22,8 @@ module DHT.KAD.Data (
                     , Bucket(..)
                     , Cache
                     , Deadline
-                    , getCurrentTimeAsDeadline
+                    , Timestamp
+                    , getTimestamp
                     ) where
 
 import Crypto.Hash.RIPEMD160 as R160
@@ -217,6 +220,14 @@ addNode target b@(Bucket local nodemap) threshold
           newItemBucket = Bucket local $ IntMap.insert idx [target] nodemap
           updatedBucket nodes = Bucket local $ IntMap.update (\xs -> Just (if target `notElem` xs then target : (if length nodes > threshold then take (threshold - 1) xs else xs) else xs)) idx nodemap
 
+addNodes :: [Node] -> Bucket -> Int -> Bucket
+addNodes nodes b@(Bucket local nodemap) threshold
+    | threshold > 0 =
+        Bucket local $ foldr (\x m -> let index = idx(x) in maybe (new x) (\ns -> update index x ns) (IntMap.lookup index nodemap)) nodemap $ filter (\x -> nid x /= nid local) nodes
+    where idx n = dist2idx $ nodeDist local n
+          new node = IntMap.insert (idx node) [node] nodemap
+          update index node nodes' = IntMap.update (\xs -> Just (if node `notElem` xs then node : (if length nodes' > threshold then take (threshold - 1) xs else xs) else xs)) index nodemap
+
 deleteNode :: Node -> Bucket -> Bucket
 deleteNode target b@(Bucket local nodemap) =
     if IntMap.member idx nodemap then
@@ -244,6 +255,9 @@ nearNodes target (Bucket local nodemap) threshold
           aroundNodes ns = if length ns <= threshold then ns else take threshold ns
           localnid = nid local
 
+allNodes :: Bucket -> [Node]
+allNodes (Bucket _ nodemap) = concat $ IntMap.elems nodemap
+
 string2nid :: String -> Word160
 string2nid = byteString2Word160 . R160.hash . BC.pack
 
@@ -255,9 +269,10 @@ ip2string ip = (show b0) ++ "." ++ (show b1) ++ "." ++ (show b2) ++ "." ++ (show
       b2 = fromIntegral (ip `shiftR` 08) :: Word8
       b3 = fromIntegral  ip              :: Word8
 
-type Deadline = Word32
+type Timestamp = Word32
+type Deadline = Timestamp
 
-getCurrentTimeAsDeadline :: IO Deadline
-getCurrentTimeAsDeadline = do
+getTimestamp :: IO Timestamp
+getTimestamp = do
   t <- getPOSIXTime
-  return (fromIntegral (round t) :: Deadline)
+  return (fromIntegral (round t) :: Timestamp)

@@ -109,7 +109,7 @@ joinSelf roots bucket = do
 
 doSendStore :: Node -> Key -> Value -> Deadline -> [Node] -> IO [Node]
 doSendStore local k v d toSend = do
-  now <- getCurrentTimeAsDeadline
+  now <- getTimestamp
   r <- P.mapM (sendStore' local k v d now) toSend
   let ns = foldr (\x ns' -> maybe ns' (\n -> n : ns') x) [] r
   return ns

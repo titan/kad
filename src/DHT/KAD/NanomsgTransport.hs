@@ -2,6 +2,7 @@ module DHT.KAD.NanomsgTransport(createTransport) where
 
 import Data.ByteString
 import Nanomsg
+import System.Posix.Types (Fd(..))
 
 import DHT.KAD.Data
 import DHT.KAD.Transport as Transport
@@ -15,7 +16,8 @@ createTransport t = do
   return Transport { Transport.connect = nanoConnect ts
                    , Transport.bind = nanoBind ts
                    , Transport.ipc = nanoIpc ts
-                   , Transport.free = nanoFree ts}
+                   , Transport.free = nanoFree ts
+                   }
 
 nanoConnect :: (Sender a, Receiver a) => TransportState a -> Node -> IO (Either String Connection)
 nanoConnect ts (Node _ ip port) = do
