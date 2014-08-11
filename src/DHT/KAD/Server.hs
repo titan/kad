@@ -3,7 +3,7 @@ module DHT.KAD.Server (start) where
 import Control.Concurrent (forkIO)
 import Control.Concurrent.MVar
 import Control.Exception (bracket)
-import Control.Monad (forever, void)
+import Control.Monad (forever, void, when)
 import Control.Monad.Parallel as P (mapM)
 import Data.Maybe
 import qualified Data.IntMap.Strict as IntMap
@@ -19,10 +19,9 @@ import DHT.KAD.Transport as Transport
 
 start :: MVar Bucket -> MVar Cache -> IO ()
 start bucket cache =
-  bracket (createTransport Rep)
-          Transport.free $ \t ->
-              bracket (readMVar bucket >>= \b@(Bucket local _) -> Transport.bind t local) (either (\_ -> return ()) Transport.close) $
-                      either putStrLn $ \conn -> getTimestamp >>= loop bucket cache conn
+    withTransport Rep $ \t ->
+        readMVar bucket >>= \b@(Bucket local _) -> Transport.bind t local $
+        either (hPutStrLn stderr) $ \conn -> getTimestamp >>= loop bucket cache conn
     where
       sendNearNodes conn sn nid bucket@(Bucket local _) = do
         let nodes = nearNodes nid bucket 3
@@ -30,7 +29,7 @@ start bucket cache =
         return ()
       loop bucket cache conn lastTimestamp = do
         m <- timeout (60 * 1000000) $ Transport.recv conn
-        maybe (getTimestamp >>= \now -> if now - lastTimestamp > 3600 then refresh bucket else return ())
+        maybe (getTimestamp >>= \now -> when (now - lastTimestamp > 3600) $ refresh bucket)
                   (either putStrLn (\(RPC.Message (MsgHead sn from) msg) -> do
                                       now <- getTimestamp
                                       case msg of
@@ -57,26 +56,22 @@ tryAddNode node bucket threshold =
     where
       idx node local = dist2idx $ nodeDist local node
       newItemBucket local nodemap = return $ Bucket local $ IntMap.insert (idx node local) [node] nodemap
-      updatedBucket bkt@(Bucket local nodemap) nodes =
-        if length nodes < threshold then
-            if node `notElem` nodes then
-                return $ Bucket local $ IntMap.insert (idx node local) (node : nodes) nodemap
-            else
-                return bkt
-        else
-            if node `notElem` nodes then
-                sendPing' local (last nodes) >>= maybe
-                              (return $ Bucket local $ IntMap.insert (idx node local) (node : take (length nodes - 1) nodes) nodemap)
-                              (\_ -> return $ Bucket local $ IntMap.insert (idx node local) ((last nodes) : take (length nodes - 1) nodes) nodemap)
-            else
-                return $ Bucket local $ IntMap.insert (idx node local) (node : dropWhile (\x -> nid x == nid node) nodes) nodemap
+      updatedBucket bkt@(Bucket local nodemap) nodes
+          | length nodes < threshold && node `notElem` nodes = return $ Bucket local $ IntMap.insert (idx node local) (node : nodes) nodemap
+          | length nodes < threshold && node `elem` nodes = return bkt
+          | node `notElem` nodes =
+              sendPing' local (last nodes) >>=
+                maybe
+                  (return $ Bucket local $ IntMap.insert (idx node local) (node : take (length nodes - 1) nodes) nodemap)
+                  (\_ -> return $ Bucket local $ IntMap.insert (idx node local) (last nodes : take (length nodes - 1) nodes) nodemap)
+          | otherwise = return $ Bucket local $ IntMap.insert (idx node local) (node : dropWhile (\x -> nid x == nid node) nodes) nodemap
 
 sendPing' :: Node -> Node -> IO (Maybe Node)
 sendPing' l n =
-    bracket (createTransport Req) Transport.free $ \t ->
-        bracket (Transport.connect t n) (either (\_ -> return ()) Transport.close) $
-                either (\err -> hPutStrLn stderr err >> return Nothing) $ \conn -> do
-                  sn <- RPC.genSN
-                  runSendM (sendPing (MsgHead sn l)) conn
-                  m <- timeout (30 * 1000000) $ Transport.recv conn
-                  maybe (hPutStrLn stderr ("Send Ping to " ++ (show n) ++ " timeout") >> return Nothing) (either ((>> return Nothing) . (hPutStrLn stderr)) (\(Message (MsgHead sn' from) msg) -> if sn' == sn then case msg of Pong -> return (Just from); _ -> return Nothing else return Nothing) . RPC.unpackMessage) m
+    withTransport Req $ \t ->
+        Transport.connect t n $
+                 either (\err -> hPutStrLn stderr err >> return Nothing) $ \conn -> do
+                   sn <- RPC.genSN
+                   runSendM (sendPing (MsgHead sn l)) conn
+                   m <- timeout (30 * 1000000) $ Transport.recv conn
+                   maybe (hPutStrLn stderr ("Send Ping to " ++ show n ++ " timeout") >> return Nothing) (either ((>> return Nothing) . hPutStrLn stderr) (\(Message (MsgHead sn' from) msg) -> if sn' == sn then case msg of Pong -> return (Just from); _ -> return Nothing else return Nothing) . RPC.unpackMessage) m

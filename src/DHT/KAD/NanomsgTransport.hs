@@ -1,13 +1,16 @@
-module DHT.KAD.NanomsgTransport(createTransport) where
+module DHT.KAD.NanomsgTransport(withTransport) where
 
+import Control.Exception (bracket, try)
 import Data.ByteString
 import Nanomsg
-import System.Posix.Types (Fd(..))
 
 import DHT.KAD.Data
 import DHT.KAD.Transport as Transport
 
 data TransportState a = State {sock :: Socket a}
+
+withTransport :: (Sender a, Receiver a) => a -> (Transport -> IO b) -> IO b
+withTransport t = bracket (createTransport t) Transport.free
 
 createTransport :: (Sender a, Receiver a) => a -> IO Transport
 createTransport t = do
@@ -19,32 +22,30 @@ createTransport t = do
                    , Transport.free = nanoFree ts
                    }
 
-nanoConnect :: (Sender a, Receiver a) => TransportState a -> Node -> IO (Either String Connection)
-nanoConnect ts (Node _ ip port) = do
-  let addr = "tcp://" ++ (ip2string ip) ++ ":" ++ show port
-  e <- Nanomsg.connect (sock ts) addr
-  return $ Right Connection { Transport.send = nanoSend $ sock ts
-                            , Transport.recv = nanoRecv $ sock ts
-                            , Transport.close = nanoClose (sock ts) e
-                            }
+nanoConnect :: (Sender a, Receiver a) => TransportState a -> Node -> (Either String Connection -> IO b) -> IO b
+nanoConnect ts (Node _ ip port) action = do
+  let addr = "tcp://" ++ ip2string ip ++ ":" ++ show port
+  nanoConn ts (Nanomsg.connect (sock ts) addr) action
 
-nanoBind :: (Sender a, Receiver a) => TransportState a -> Node -> IO (Either String Connection)
-nanoBind ts (Node _ ip port) = do
-  let addr = "tcp://" ++ (ip2string ip) ++ ":" ++ show port
-  e <- Nanomsg.bind (sock ts) addr
-  return $ Right Connection { Transport.send = nanoSend $ sock ts
-                            , Transport.recv = nanoRecv $ sock ts
-                            , Transport.close = nanoClose (sock ts) e
-                            }
+nanoBind :: (Sender a, Receiver a) => TransportState a -> Node -> (Either String Connection -> IO b) -> IO b
+nanoBind ts (Node _ ip port) action = do
+  let addr = "tcp://" ++ ip2string ip ++ ":" ++ show port
+  nanoConn ts (Nanomsg.bind (sock ts) addr) action
 
-nanoIpc :: (Sender a, Receiver a) => TransportState a -> Path -> IO (Either String Connection)
-nanoIpc ts path = do
+nanoIpc :: (Sender a, Receiver a) => TransportState a -> Path -> (Either String Connection -> IO b) -> IO b
+nanoIpc ts path action = do
   let addr = "ipc://" ++ path
-  e <- Nanomsg.bind (sock ts) addr
-  return $ Right Connection { Transport.send = nanoSend $ sock ts
+  nanoConn ts (Nanomsg.bind (sock ts) addr) action
+
+nanoConn :: (Sender a, Receiver a) => TransportState a -> IO Endpoint -> (Either String Connection -> IO b) -> IO b
+nanoConn ts ep action = do
+  r <- try ep
+  bracket (either (\x -> return $ Left $ show (x :: NNException))
+           (\_ -> return $
+                  Right Connection {
+                              Transport.send = nanoSend $ sock ts
                             , Transport.recv = nanoRecv $ sock ts
-                            , Transport.close = nanoClose (sock ts) e
-                            }
+                            }) r) (either (\_ -> return ()) (\_ -> either (\_ -> return ()) (nanoClose (sock ts)) r)) action
 
 nanoFree :: TransportState a -> IO ()
 nanoFree = Nanomsg.close . sock

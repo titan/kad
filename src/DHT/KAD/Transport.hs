@@ -1,3 +1,4 @@
+{-# LANGUAGE RankNTypes #-}
 module DHT.KAD.Transport
     (
      Transport(..)
@@ -14,14 +15,13 @@ import DHT.KAD.Data
 type Path = String
 
 data Transport = Transport {
-      connect :: Node -> IO (Either String Connection)
-    , bind :: Node -> IO (Either String Connection)
-    , ipc :: Path -> IO (Either String Connection)
+      connect :: forall a. Node -> (Either String Connection -> IO a) -> IO a
+    , bind :: forall a. Node -> (Either String Connection -> IO a) -> IO a
+    , ipc :: forall a. Path -> (Either String Connection -> IO a) -> IO a
     , free :: IO ()
     }
 
 data Connection = Connection {
       send :: ByteString -> IO (Either String Int)
     , recv :: IO ByteString
-    , close :: IO ()
 }
