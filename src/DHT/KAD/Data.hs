@@ -24,8 +24,15 @@ module DHT.KAD.Data (
                     , Deadline
                     , Timestamp
                     , getTimestamp
+                    , logMsg
+                    , AppConfig(..)
+                    , App
+                    , runApp
                     ) where
 
+import Control.Concurrent.MVar
+import Control.Monad.Reader
+import Control.Monad.Writer
 import Crypto.Hash.RIPEMD160 as R160
 import Data.Bits
 import qualified Data.ByteString as B
@@ -36,6 +43,7 @@ import qualified Data.Map.Strict as Map hiding (delete)
 import Data.Time.Clock.POSIX
 import Data.Word
 import Prelude hiding (lookup)
+import System.IO (hPutStrLn, stderr)
 
 type IP = Word32
 type PORT = Word16
@@ -276,3 +284,23 @@ getTimestamp :: IO Timestamp
 getTimestamp = do
   t <- getPOSIXTime
   return (fromIntegral (round t) :: Timestamp)
+
+logMsg :: String -> IO ()
+logMsg s = do
+  t <- getTimestamp
+  hPutStrLn stderr $ show t ++ " | " ++ s
+
+data AppConfig = AppConfig {
+      timeout' :: Int
+    , nodeCount :: Int
+    , threshold :: Int
+    , bucket :: MVar Bucket
+    , cache :: MVar Cache
+}
+
+type App = ReaderT AppConfig IO
+
+runApp :: Int -> Int -> Int -> MVar Bucket -> MVar Cache -> App a -> IO a
+runApp t nc th b c a =
+    let config = AppConfig t nc th b c
+    in runReaderT a config
