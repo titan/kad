@@ -4,10 +4,10 @@ module DHT.KAD.Client (
                       , store
                       ) where
 
-import Control.Concurrent (forkIO)
+import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.MVar
 import Control.Exception (bracket)
-import Control.Monad (liftM)
+import Control.Monad (forever, liftM)
 import Control.Monad.Reader
 import Control.Monad.Parallel as P (mapM)
 import Data.Bits
@@ -25,7 +25,11 @@ import DHT.KAD.RPC as RPC
 import DHT.KAD.Transport as Transport
 
 start :: [Node] -> App ()
-start = joinSelf
+start nodes = do
+  joinSelf nodes
+  forever $ do
+    liftIO $ threadDelay $ 60 * 60 * 1000000
+    refresh
 
 findNode :: NID -> App [Node]
 findNode nid = do
@@ -177,3 +181,17 @@ doSendStore k v d toSend = do
 deleteNoResponses :: [Node] -> Bucket -> Bucket
 deleteNoResponses [] b = b
 deleteNoResponses xs b = foldr deleteNode b xs
+
+refresh :: App ()
+refresh = do
+  (AppConfig timeout' nodeCount threshold bucket cache local) <- ask
+  kache <- liftIO $ readMVar cache
+  now <- liftIO $ getTimestamp
+  forM_ (Map.keys kache) $ \x ->
+      case Map.lookup x kache of
+        Just (d, v) ->
+            if now < d then
+                store x v d
+            else
+              liftIO $ modifyMVar_ cache (return . Map.delete x)
+        Nothing -> return ()
