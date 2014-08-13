@@ -18,50 +18,50 @@ import DHT.KAD.NanomsgTransport
 import DHT.KAD.RPC as RPC
 import DHT.KAD.Transport as Transport
 
-type ServerM = ReaderT (Int, Int, Int, MVar Bucket, MVar Cache) IO
-runServerM t nc th b c a = runReaderT a (t, nc, th, b, c)
+type ServerM = ReaderT (Int, Int, Int, MVar Bucket, MVar Cache, Node) IO
+runServerM t nc th b c l a = runReaderT a (t, nc, th, b, c, l)
 
 start :: App ()
 start = do
-  (AppConfig timeout' nodeCount threshold bucket cache) <- ask
+  (AppConfig timeout' nodeCount threshold bucket cache local) <- ask
   liftIO $ withTransport Rep $ \t ->
-        readMVar bucket >>= \b@(Bucket local _) -> Transport.bind t local $
-        either logMsg $ \conn -> getTimestamp >>= (runServerM timeout' nodeCount threshold bucket cache) . loop conn
+        Transport.bind t local $
+        either logMsg $ \conn -> getTimestamp >>= (runServerM timeout' nodeCount threshold bucket cache local) . loop conn
     where
       sendNearNodes :: Connection -> Word160 -> NID -> ServerM ()
       sendNearNodes conn sn nid = do
-          (_, nc, _, bucket, _) <- ask
-          bkt@(Bucket local _) <- liftIO $ readMVar bucket
+          (_, nc, _, bucket, _, local) <- ask
+          bkt <- liftIO $ readMVar bucket
           let nodes = nearNodes nid bkt nc
           liftIO $ runSendM (sendFoundNode (MsgHead sn local) nodes) conn
           return ()
       loop :: Connection -> Timestamp -> ServerM ()
       loop conn lastTimestamp = do
-          (_, _, _, bucket, cache) <- ask
+          (_, _, _, bucket, cache, local) <- ask
           m <- liftIO $ timeout (60 * 1000000) $ Transport.recv conn
           maybe (liftIO getTimestamp >>= \now -> when (now - lastTimestamp > 3600) $ refresh)
                     (either (liftIO . logMsg) (\(RPC.Message (MsgHead sn from) msg) -> do
                                       now <- liftIO getTimestamp
                                       case msg of
-                                        Ping -> liftIO (readMVar bucket >>= \(Bucket local map') -> runSendM (sendPong (MsgHead sn local)) conn) >> tryAddNode from >> loop conn now
-                                        Store k v d -> liftIO (modifyMVar_ cache (return . Map.insert k (d, v)) >> readMVar bucket >>= \(Bucket local _) -> runSendM (sendStored (MsgHead sn local) k) conn) >> tryAddNode from >> loop conn now
+                                        Ping -> liftIO (runSendM (sendPong (MsgHead sn local)) conn) >> tryAddNode from >> loop conn now
+                                        Store k v d -> liftIO (modifyMVar_ cache (return . Map.insert k (d, v)) >> runSendM (sendStored (MsgHead sn local) k) conn) >> tryAddNode from >> loop conn now
                                         FindNode nid -> sendNearNodes conn sn nid >> tryAddNode from >> loop conn now
-                                        FindValue k -> liftIO (readMVar cache) >>= maybe (sendNearNodes conn sn k) (\(d, v) -> liftIO (readMVar bucket >>= \(Bucket local _) -> void $ runSendM (sendFoundValue (MsgHead sn local) k v d) conn)) . Map.lookup k >> tryAddNode from >> loop conn now
+                                        FindValue k -> liftIO (readMVar cache) >>= maybe (sendNearNodes conn sn k) (\(d, v) -> liftIO (void $ runSendM (sendFoundValue (MsgHead sn local) k v d) conn)) . Map.lookup k >> tryAddNode from >> loop conn now
                                         Error err -> liftIO (logMsg err) >> loop conn now
                                    ) . RPC.unpackMessage) m
 
 refresh :: ServerM ()
 refresh = do
-  (t, _, th, bucket, _) <- ask
+  (t, _, th, bucket, _, local) <- ask
   liftIO $ do
-            b@(Bucket local _) <- readMVar bucket
+            b <- readMVar bucket
             r <- P.mapM (\x -> sendPing' local x t) $ allNodes b
-            modifyMVar_ bucket $ \bkt@(Bucket local _) -> return $ addNodes (catMaybes r) (Bucket local IntMap.empty) th
+            modifyMVar_ bucket $ \bkt -> return $ addNodes (catMaybes r) (Bucket local IntMap.empty) th
 
 tryAddNode :: Node -> ServerM ()
 tryAddNode node = do
-  (t, _, th, bucket, _) <- ask
-  liftIO $ modifyMVar_ bucket $ \bkt@(Bucket local nodemap) ->
+  (t, _, th, bucket, _, local) <- ask
+  liftIO $ modifyMVar_ bucket $ \bkt@(Bucket _ nodemap) ->
       if nid node == nid local then
           return bkt
       else

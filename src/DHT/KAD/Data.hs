@@ -32,7 +32,6 @@ module DHT.KAD.Data (
 
 import Control.Concurrent.MVar
 import Control.Monad.Reader
-import Control.Monad.Writer
 import Crypto.Hash.RIPEMD160 as R160
 import Data.Bits
 import qualified Data.ByteString as B
@@ -296,11 +295,12 @@ data AppConfig = AppConfig {
     , threshold :: Int
     , bucket :: MVar Bucket
     , cache :: MVar Cache
+    , local :: Node
 }
 
 type App = ReaderT AppConfig IO
 
-runApp :: Int -> Int -> Int -> MVar Bucket -> MVar Cache -> App a -> IO a
-runApp t nc th b c a =
-    let config = AppConfig t nc th b c
+runApp :: Int -> Int -> Int -> MVar Bucket -> MVar Cache -> Node -> App a -> IO a
+runApp t nc th b c l a =
+    let config = AppConfig t nc th b c l
     in runReaderT a config

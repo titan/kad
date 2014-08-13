@@ -8,14 +8,15 @@ import Control.Concurrent (forkIO)
 import Control.Concurrent.MVar
 import Control.Exception (bracket)
 import Control.Monad (liftM)
+import Control.Monad.Reader
 import Control.Monad.Parallel as P (mapM)
+import Data.Bits
 import Data.List (sortBy)
 import qualified Data.IntMap.Strict as IntMap
 import qualified Data.Map.Strict as Map
-import Data.Maybe (catMaybes, isJust)
+import Data.Maybe (catMaybes, isJust, fromJust)
 import Data.Serialize
 import Nanomsg
-import System.IO (hPutStrLn, stderr)
 import System.Timeout (timeout)
 
 import DHT.KAD.Data hiding (findNode)
@@ -23,29 +24,30 @@ import DHT.KAD.NanomsgTransport
 import DHT.KAD.RPC as RPC
 import DHT.KAD.Transport as Transport
 
-start :: MVar Bucket -> [Node] -> IO ()
-start = flip joinSelf
+start :: [Node] -> App ()
+start = joinSelf
 
-findNode :: NID -> MVar Bucket -> IO [Node]
-findNode nid bucket = do
-  bkt@(Bucket local _) <- readMVar bucket
-  let nodes = nearNodes nid bkt 3
-  (targets, nrps) <- go local Map.empty Map.empty nodes
-  modifyMVar_ bucket (return . deleteNoResponses nrps)
+findNode :: NID -> App [Node]
+findNode nid = do
+  (AppConfig timeout' nodeCount threshold bucket _ local) <- ask
+  bkt <- liftIO $ readMVar bucket
+  let nodes = nearNodes nid bkt nodeCount
+  (targets, nrps) <- liftIO $ go local Map.empty Map.empty nodes timeout' threshold
+  liftIO $ modifyMVar_ bucket (return . deleteNoResponses nrps)
   return targets
     where
-      sendFindNode' :: Node -> Node -> IO (Node, Maybe [Node])
-      sendFindNode' local n =
+      sendFindNode' :: Node -> Int -> Node -> IO (Node, Maybe [Node])
+      sendFindNode' local timeout' n =
           withTransport Req $ \t ->
               Transport.connect t n $
-                      either (\err -> hPutStrLn stderr err >> return (n, Nothing)) $ \c -> do
+                      either (\err -> logMsg err >> return (n, Nothing)) $ \c -> do
                         sn <- RPC.genSN
                         runSendM (sendFindNode (MsgHead sn local) nid) c
-                        m <- timeout (30 * 1000000) $ Transport.recv c
+                        m <- timeout timeout' $ Transport.recv c
                         maybe
-                          (hPutStrLn stderr "Send FindNode timeout" >> return (n, Nothing))
+                          (logMsg "Send FindNode timeout" >> return (n, Nothing))
                           (either
-                           (\err -> hPutStrLn stderr err >> return (n, Nothing))
+                           (\err -> logMsg err >> return (n, Nothing))
                            (\(Message (MsgHead sn' _) msg) ->
                                 if sn' == sn then
                                     case msg of
@@ -54,46 +56,54 @@ findNode nid bucket = do
                                 else
                                     return (n, Nothing)) . RPC.unpackMessage)
                           m
-      go :: Node -> Map.Map Node Int -> Map.Map Node Int -> [Node] -> IO ([Node], [Node])
-      go _ result failed [] =
-          return (if Map.size result > 8 then
-                      take 8 $ sortBy (\a@(Node anid _ _) b@(Node bnid _ _) -> compare (dist2idx (nidDist nid anid)) (dist2idx (nidDist nid bnid))) (Map.keys result)
+      go :: Node -> Map.Map Node Int -> Map.Map Node Int -> [Node] -> Int -> Int -> IO ([Node], [Node])
+      go _ result failed [] _ threshold =
+          return (if Map.size result > threshold then
+                      take threshold $ sortBy (\a@(Node anid _ _) b@(Node bnid _ _) -> compare (dist2idx (nidDist nid anid)) (dist2idx (nidDist nid bnid))) (Map.keys result)
                   else
                       Map.keys result, Map.keys failed)
-      go local result failed toSend = do
-                        found <- P.mapM (sendFindNode' local) toSend
+      go local result failed toSend timeout' threshold = do
+                        found <- P.mapM (sendFindNode' local timeout') toSend
                         let (tm, fm) = foldr (\(src, x) (tm, fm) -> maybe (tm, Map.insert src 0 fm) (\ns -> (foldr (\y m -> Map.insert y 0 m) tm ns, fm)) x) (Map.empty :: Map.Map Node Int, failed) found
                         let rm = foldr (\x m -> Map.insert x 0 m) result $ filter (\x -> x `Map.notMember` failed && x `Map.notMember` result) toSend
                         let unsent = filter (\x -> x `notElem` toSend && x `Map.notMember` fm && x `Map.notMember` rm) (Map.keys tm)
-                        go local rm fm unsent
+                        go local rm fm unsent timeout' threshold
 
-findValue :: Key -> MVar Bucket -> MVar Cache -> IO (Maybe (Deadline, Value))
-findValue key bucket cache = do
-  kache <- readMVar cache
-  case Map.lookup key kache of
-    v@(Just _) -> return v
-    _ -> do
-      bkt@(Bucket local _) <- readMVar bucket
-      let nodes = nearNodes key bkt 3
-      -- mapM_ (\n -> hPutStrLn stderr ("found " ++ show n ++ " near key " ++ show key)) nodes
-      (p, nrps, nvs) <- go local nodes key Nothing Map.empty Map.empty
-      -- mapM_ (\(Node _ ip port) -> hPutStrLn stderr (ip2string ip ++ ":" ++ show port ++ " no response to " ++ ip2string lip ++ ":" ++ show lport)) nrps
-      modifyMVar_ bucket (return . deleteNoResponses nrps)
-      maybe (return p) (\(d, v) -> do nrps' <- doSendStore local key v d nvs; modifyMVar_ bucket (return . deleteNoResponses nrps'); return p) p
+findValue :: Key -> App (Maybe (Deadline, Value))
+findValue key = do
+  (AppConfig timeout' nodeCount _ bucket cache local) <- ask
+  kache <- liftIO $ readMVar cache
+  now <- liftIO getTimestamp
+  let vp = Map.lookup key kache
+  if isJust vp && now < fst (fromJust vp) then
+      return vp
+  else do
+    bkt <- liftIO $ readMVar bucket
+    let nodes = nearNodes key bkt nodeCount
+    (p, nrps, nvs) <- liftIO $ go local nodes key Nothing Map.empty Map.empty timeout'
+    liftIO $ modifyMVar_ bucket (return . deleteNoResponses nrps)
+    maybe
+      (return p)
+      (\(d, v) -> do
+         nrps' <- doSendStore key v d nvs
+         liftIO $ modifyMVar_ bucket (return . deleteNoResponses nrps')
+         liftIO $ modifyMVar_ cache (return . Map.insert key (if now < d then now + (d - now) `shiftR` 1 else d, v))
+         return p)
+      p
     where
-      sendFindValue' :: Node -> Key -> Node -> IO (Node, Maybe (Either [Node] (Deadline, Value)))
-      sendFindValue' local k n =
+      sendFindValue' :: Node -> Key -> Int -> Node -> IO (Node, Maybe (Either [Node] (Deadline, Value)))
+      sendFindValue' local k timeout' n =
           withTransport Req $ \t ->
               Transport.connect t n $
-                       either (\err -> hPutStrLn stderr err >> return (n, Nothing)) $ \conn ->
+                       either (\err -> logMsg err >> return (n, Nothing)) $ \conn ->
                             do
                               sn <- RPC.genSN
                               runSendM (sendFindValue (MsgHead sn local) k) conn
-                              m <- timeout (30 * 1000000) $ Transport.recv conn
+                              m <- timeout timeout' $ Transport.recv conn
                               maybe
-                                (hPutStrLn stderr ("Send FindValue to " ++ show n ++ " timeout") >> return (n, Nothing))
+                                (logMsg ("Send FindValue to " ++ show n ++ " timeout") >> return (n, Nothing))
                                 (either
-                                 ((>> return (n, Nothing)) . hPutStrLn stderr)
+                                 ((>> return (n, Nothing)) . logMsg)
                                  (\(Message (MsgHead sn' _) msg) ->
                                       if sn' == sn then
                                           case msg of
@@ -103,55 +113,58 @@ findValue key bucket cache = do
                                       else
                                           return (n, Nothing)) . RPC.unpackMessage)
                                 m
-      go :: Node -> [Node] -> Key -> Maybe (Deadline, Value) -> Map.Map Node Int -> Map.Map Node Int -> IO (Maybe (Deadline, Value), [Node], [Node])
-      go _ [] _ p noResponses noValues = return (p, Map.keys noResponses, Map.keys noValues)
-      go local toSend k p noResponses noValues =
+      go :: Node -> [Node] -> Key -> Maybe (Deadline, Value) -> Map.Map Node Int -> Map.Map Node Int -> Int -> IO (Maybe (Deadline, Value), [Node], [Node])
+      go _ [] _ p noResponses noValues _ = return (p, Map.keys noResponses, Map.keys noValues)
+      go local toSend k p noResponses noValues timeout' =
           do
-            r <- P.mapM (sendFindValue' local k) toSend
+            r <- P.mapM (sendFindValue' local k timeout') toSend
             let (p', nodes, noResponses', noValues') = foldr (\(src, x) (p'', nodes, noResponses'', noValues'') -> maybe (p'', nodes, Map.insert src 0 noResponses'', noValues'') (either (\ns' -> (p'', ns' ++ nodes, noResponses'', Map.insert src 0 noValues'')) (\p''' -> (Just p''', nodes, noResponses'', noValues''))) x) (Nothing, [], noResponses, noValues) r
             let toSend' = foldr (\x m -> Map.insert x 0 m) Map.empty $ filter (\x -> x `Map.notMember` noResponses' && x `Map.notMember` noValues' && x `notElem` toSend) nodes
-            go local (Map.keys toSend') k (maybe p Just p') noResponses' noValues'
+            go local (Map.keys toSend') k (maybe p Just p') noResponses' noValues' timeout'
 
-store :: Key -> Value -> Deadline -> MVar Bucket -> MVar Cache -> IO ()
-store key value deadline bucket cache = do
-  nodes <- findNode key bucket
+store :: Key -> Value -> Deadline -> App ()
+store key value deadline = do
+  (AppConfig _ _ _ bucket cache _) <- ask
+  nodes <- findNode key
   if null nodes then
-      modifyMVar_ cache $ return . Map.insert key (deadline, value)
+      liftIO $ modifyMVar_ cache $ return . Map.insert key (deadline, value)
   else
       do
-        (Bucket local _) <- readMVar bucket
-        nrps <- doSendStore local key value deadline nodes
-        modifyMVar_ bucket (return . deleteNoResponses nrps)
+        nrps <- doSendStore key value deadline nodes
+        liftIO $ modifyMVar_ bucket (return . deleteNoResponses nrps)
         return ()
 
-joinSelf :: [Node] -> MVar Bucket -> IO ()
-joinSelf roots bucket = do
-  modifyMVar_ bucket $ \bkt -> return $ foldr (\x b -> addNode x b 8) bkt roots
-  bkt@(Bucket local@(Node nid _ _) map') <- readMVar bucket
-  nodes <- findNode nid bucket
-  modifyMVar_ bucket $ \bkt -> return $ foldr (\x b -> addNode x b 8) bkt nodes
+joinSelf :: [Node] -> App ()
+joinSelf roots = do
+  (AppConfig _ _ threshold bucket _ local) <- ask
+  addNode' threshold roots bucket
+  nodes <- findNode (nid local)
+  addNode' threshold nodes bucket
+    where
+      addNode' th ns bucket = liftIO $ modifyMVar_ bucket $ \bkt -> return $ foldr (\x b -> addNode x b th) bkt ns
 
-doSendStore :: Node -> Key -> Value -> Deadline -> [Node] -> IO [Node]
-doSendStore local k v d toSend = do
-  now <- getTimestamp
-  r <- P.mapM (sendStore' local k v d now) toSend
+doSendStore :: Key -> Value -> Deadline -> [Node] -> App [Node]
+doSendStore k v d toSend = do
+  (AppConfig timeout' _ _ bucket _ local) <- ask
+  now <- liftIO getTimestamp
+  r <- liftIO $ P.mapM (sendStore' local k v d now timeout') toSend
   let ns = foldr (\x ns' -> maybe ns' (: ns') x) [] r
   return ns
     where
-      sendStore' :: Node -> Key -> Value -> Deadline -> Deadline -> Node -> IO (Maybe Node)
-      sendStore' local k v d now n =
+      sendStore' :: Node -> Key -> Value -> Deadline -> Deadline -> Int -> Node -> IO (Maybe Node)
+      sendStore' local k v d now timeout' n =
           withTransport Req $ \t ->
               Transport.connect t n $
                        either
-                         (\err -> hPutStrLn stderr err >> return Nothing)
+                         (\err -> logMsg err >> return Nothing)
                          (\conn ->
                               RPC.genSN >>=
                                      \sn ->
                                          runSendM (sendStore (MsgHead sn local) k v $ adjustDeadline d now k n) conn >>
-                                                  timeout (30 * 1000000) (Transport.recv conn) >>=
+                                                  timeout timeout' (Transport.recv conn) >>=
                                                           maybe
-                                                            (hPutStrLn stderr ("Send Store to " ++ show n ++ " timeout") >> return (Just n))
-                                                            (either (\err -> hPutStrLn stderr err >> return (Just n)) (\(Message (MsgHead sn' _) _) -> return $ if sn' == sn then Nothing else Just n) . RPC.unpackMessage))
+                                                            (logMsg ("Send Store to " ++ show n ++ " timeout") >> return (Just n))
+                                                            (either (\err -> logMsg err >> return (Just n)) (\(Message (MsgHead sn' _) _) -> return $ if sn' == sn then Nothing else Just n) . RPC.unpackMessage))
       adjustDeadline :: Deadline -> Deadline -> Key -> Node -> Deadline
       adjustDeadline d now k (Node nid _ _) =
           if d > now then
