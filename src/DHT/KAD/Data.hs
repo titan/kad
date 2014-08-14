@@ -230,7 +230,7 @@ addNode target b@(Bucket local nodemap) threshold
 addNodes :: [Node] -> Bucket -> Int -> Bucket
 addNodes nodes b@(Bucket local nodemap) threshold
     | threshold > 0 =
-        Bucket local $ foldr (\x m -> let index = idx(x) in maybe (new x) (\ns -> update index x ns) (IntMap.lookup index nodemap)) nodemap $ filter (\x -> nid x /= nid local) nodes
+        Bucket local $ foldr (\x m -> let index = idx x in maybe (new x) (update index x) (IntMap.lookup index nodemap)) nodemap $ filter (\x -> nid x /= nid local) nodes
     where idx n = dist2idx $ nodeDist local n
           new node = IntMap.insert (idx node) [node] nodemap
           update index node nodes' = IntMap.update (\xs -> Just (if node `notElem` xs then node : (if length nodes' > threshold then take (threshold - 1) xs else xs) else xs)) index nodemap
@@ -290,7 +290,7 @@ logMsg s = do
   hPutStrLn stderr $ show t ++ " | " ++ s
 
 data AppConfig = AppConfig {
-      timeout' :: Int
+      netTimeout :: Int
     , nodeCount :: Int
     , threshold :: Int
     , bucket :: MVar Bucket

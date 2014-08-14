@@ -22,10 +22,11 @@ import Data.ByteString
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as BC
 import Data.Char
-import Data.Map as Map
+import qualified Data.Map as Map
 import Data.Serialize
 import Data.Word
 import System.Random
+import System.Timeout (timeout)
 
 import DHT.KAD.Data
 import DHT.KAD.Transport
@@ -200,33 +201,129 @@ sendMessage h b = do
   where sendMsg :: Connection -> Message -> IO (Either String Int)
         sendMsg c m = send c $ packMessage m
 
-sendPing :: MsgHead -> SendM
-sendPing h = sendMessage h Ping
+sendPing' :: MsgHead -> SendM
+sendPing' h = sendMessage h Ping
 
-sendPong :: MsgHead -> SendM
-sendPong h = sendMessage h Pong
+sendPong' :: MsgHead -> SendM
+sendPong' h = sendMessage h Pong
 
-sendStore :: MsgHead -> Key -> Value -> Deadline -> SendM
-sendStore h k v d = sendMessage h $ Store k v d
+sendStore' :: MsgHead -> Key -> Value -> Deadline -> SendM
+sendStore' h k v d = sendMessage h $ Store k v d
 
-sendStored :: MsgHead -> Key -> SendM
-sendStored h k = sendMessage h $ Stored k
+sendStored' :: MsgHead -> Key -> SendM
+sendStored' h k = sendMessage h $ Stored k
 
-sendFindNode :: MsgHead -> NID -> SendM
-sendFindNode h n = sendMessage h $ FindNode n
+sendFindNode' :: MsgHead -> NID -> SendM
+sendFindNode' h n = sendMessage h $ FindNode n
 
-sendFoundNode :: MsgHead -> [Node] -> SendM
-sendFoundNode h ns = sendMessage h $ FoundNode ns
+sendFoundNode' :: MsgHead -> [Node] -> SendM
+sendFoundNode' h ns = sendMessage h $ FoundNode ns
 
-sendFindValue :: MsgHead -> Key -> SendM
-sendFindValue h k = sendMessage h $ FindValue k
+sendFindValue' :: MsgHead -> Key -> SendM
+sendFindValue' h k = sendMessage h $ FindValue k
 
-sendFoundValue :: MsgHead -> Key -> Value -> Deadline -> SendM
-sendFoundValue h k v d = sendMessage h $ FoundValue k v d
+sendFoundValue' :: MsgHead -> Key -> Value -> Deadline -> SendM
+sendFoundValue' h k v d = sendMessage h $ FoundValue k v d
 
 genSN :: IO Word160
 genSN = do
-  w0 <- getStdRandom (random) :: IO Word32
-  w1 <- getStdRandom (random) :: IO Word64
-  w2 <- getStdRandom (random) :: IO Word64
+  w0 <- getStdRandom random :: IO Word32
+  w1 <- getStdRandom random :: IO Word64
+  w2 <- getStdRandom random :: IO Word64
   return $ makeNid w0 w1 w2
+
+sendPing :: Node -> Node -> Int -> Either String Connection -> IO (Maybe Node)
+sendPing l n timeout' =
+    either ((>> return Nothing) . logMsg) $ \c -> do
+      sn <- genSN
+      runSendM (sendPing' (MsgHead sn l)) c
+      m <- timeout timeout' $ recv c
+      maybe
+        (logMsg ("Send Ping to " ++ show n ++ " timeout") >> return Nothing)
+        (either
+         ((>> return Nothing) . logMsg)
+         (\(Message (MsgHead sn' from) msg) ->
+              if sn' == sn then
+                  case msg of
+                    Pong -> return (Just from)
+                    _ -> return Nothing
+              else
+                  return Nothing) . unpackMessage) m
+
+sendPong :: Word160 -> Node -> Connection -> IO (Either String Int)
+sendPong sn local = runSendM (sendPong' (MsgHead sn local))
+
+sendFindNode :: Node -> Int -> Node -> NID -> Either String Connection -> IO (Node, Maybe [Node])
+sendFindNode l timeout' n nid =
+    either (\err -> logMsg err >> return (n, Nothing)) $ \c -> do
+      sn <- genSN
+      runSendM (sendFindNode' (MsgHead sn l) nid) c
+      m <- timeout timeout' $ recv c
+      maybe
+        (logMsg ("Send FindNode to " ++ show n ++ " timeout") >> return (n, Nothing))
+        (either
+         (\err -> logMsg err >> return (n, Nothing))
+         (\(Message (MsgHead sn' _) msg) ->
+              if sn' == sn then
+                  case msg of
+                    FoundNode ns -> return (n, Just ns)
+                    _ -> return (n, Just [])
+              else
+                  return (n, Nothing)) . unpackMessage)
+        m
+
+sendFoundNode :: Word160 -> Node -> [Node] -> Connection -> IO (Either String Int)
+sendFoundNode sn local nodes = runSendM (sendFoundNode' (MsgHead sn local) nodes)
+
+sendFindValue :: Node -> Key -> Int -> Node -> Either String Connection -> IO (Node, Maybe (Either [Node] (Deadline, Value)))
+sendFindValue l k timeout' n =
+    either (\err -> logMsg err >> return (n, Nothing)) $ \c -> do
+      sn <- genSN
+      runSendM (sendFindValue' (MsgHead sn l) k) c
+      m <- timeout timeout' $ recv c
+      maybe
+        (logMsg ("Send FindValue to " ++ show n ++ " timeout") >> return (n, Nothing))
+        (either
+         ((>> return (n, Nothing)) . logMsg)
+         (\(Message (MsgHead sn' _) msg) ->
+              if sn' == sn then
+                  case msg of
+                    FoundValue _ v d -> return (n, Just (Right (d, v)))
+                    FoundNode ns -> return (n, Just (Left ns))
+                    _ -> return (n, Nothing)
+              else
+                  return (n, Nothing)) . unpackMessage)
+        m
+
+sendFoundValue :: Word160 -> Node -> Key -> Value -> Timestamp -> Connection -> IO (Either String Int)
+sendFoundValue sn local k v d = runSendM (sendFoundValue' (MsgHead sn local) k v d)
+
+sendStore :: Node -> Key -> Value -> Deadline -> Deadline -> Int -> Node -> Either String Connection -> IO (Maybe Node)
+sendStore l k v d now timeout' n =
+    either (\err -> logMsg err >> return Nothing) $ \c -> do
+      sn <- genSN
+      runSendM (sendStore' (MsgHead sn l) k v $ adjustDeadline d now k n) c
+      m <- timeout timeout' (recv c)
+      maybe
+        (logMsg ("Send Store to " ++ show n ++ " timeout") >> return (Just n))
+        (either
+         (\err -> logMsg err >> return (Just n))
+         (\(Message (MsgHead sn' _) _) ->
+              return $
+                     if sn' == sn then
+                         Nothing
+                     else
+                         Just n) . unpackMessage)
+        m
+    where
+      adjustDeadline :: Deadline -> Deadline -> Key -> Node -> Deadline
+      adjustDeadline d now k (Node nid _ _) =
+          if d > now then
+              now + (fromIntegral (dist2idx (nidDist k nid) * delta d now `div` 160) :: Deadline)
+          else
+              0
+      delta :: Deadline -> Deadline -> Int
+      delta d now = fromIntegral (d - now) :: Int
+
+sendStored :: Word160 -> Node -> Key -> Connection -> IO (Either String Int)
+sendStored sn local k = runSendM (sendStored' (MsgHead sn local) k)
