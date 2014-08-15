@@ -38,9 +38,9 @@ start = do
           (AppConfig _ _ _ bucket cache local) <- ask
           m <- liftIO $ timeout (60 * 1000000) $ Transport.recv conn
           maybe
-            (liftIO getTimestamp >>= \now -> when (now - lastTimestamp > 3600) refresh)
+            (liftIO getTimestamp >>= \now -> when (now - lastTimestamp > 3600) refresh >> loop conn lastTimestamp)
             (either
-             (liftIO . logMsg)
+             (\err -> liftIO (logMsg err) >> loop conn lastTimestamp)
              (\(RPC.Message (RPC.MsgHead sn from) msg) -> do
                 now <- liftIO getTimestamp
                 case msg of
