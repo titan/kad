@@ -3,6 +3,7 @@ module DHT.KAD.Client (
                       , findValue
                       , store
                       , refresh
+                      , doSendStore
                       ) where
 
 import Control.Concurrent (forkIO, threadDelay)

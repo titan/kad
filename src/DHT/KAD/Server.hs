@@ -13,7 +13,7 @@ import qualified Data.Map.Strict as Map
 import Nanomsg
 import System.Timeout (timeout)
 
-import qualified DHT.KAD.Client as Client (refresh)
+import qualified DHT.KAD.Client as Client (refresh, doSendStore)
 import DHT.KAD.Data
 import DHT.KAD.NanomsgTransport
 import qualified DHT.KAD.RPC as RPC
@@ -62,7 +62,7 @@ refresh = do
 
 tryAddNode :: Node -> App ()
 tryAddNode node = do
-  (AppConfig t nc th bucket _ local) <- ask
+  (AppConfig t nc th bucket cache local) <- ask
   n1 <- liftIO $ withMVar bucket $ \bkt -> return $ findNode (nid node) bkt
   bkt' <- liftIO $ modifyMVar bucket $ \bkt@(Bucket _ nodemap) ->
          if nid node == nid local then
@@ -76,8 +76,24 @@ tryAddNode node = do
   n2 <- liftIO $ return $ findNode (nid node) bkt'
   when (isNothing n1 && isJust n2) $
        do
-         let nodes = nearNodes (nid local) bkt' nc
-         when (node `elem` nodes) Client.refresh
+         kache <- liftIO $ readMVar cache
+         let toShare = foldr (\x xs ->
+                                  if node `elem` (nearNodes x bkt' nc) then
+                                      maybe
+                                        xs
+                                        (\(d, v) -> (x, d, v) : xs)
+                                        (Map.lookup x kache)
+                                  else
+                                      xs) [] (Map.keys kache)
+         foldM_ (\b (k, d, v) ->
+                     if b then do
+                            ns <- Client.doSendStore k v d [node] -- ns are no response nodes
+                            if length ns > 0 then
+                                return False
+                            else
+                                return True
+                     else
+                         return b) True toShare
     where
       idx node local = dist2idx $ nodeDist local node
       newItemBucket local nodemap = return $ Bucket local $ IntMap.insert (idx node local) [node] nodemap
